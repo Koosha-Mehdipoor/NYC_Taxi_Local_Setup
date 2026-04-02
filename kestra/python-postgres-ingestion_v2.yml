@@ -1,0 +1,123 @@
+id: python-postgres-ingestion_v2
+namespace: company.team
+description: Scheduled flow to ingest data into PostgreSQL using a Python script.
+
+inputs:
+  - id: year
+    type: SELECT
+    displayName: "Year"
+    defaults: "2026"
+    values:
+      - "2020"
+      - "2021"
+      - "2022"
+      - "2023"
+      - "2024"
+      - "2025"
+      - "2026"
+
+  - id: month
+    type: SELECT
+    defaults: "01"
+    displayName: "Month"
+    values:
+      - "01"
+      - "02"
+      - "03"
+      - "04"
+      - "05"
+      - "06"
+      - "07"
+      - "08"
+      - "09"
+      - "10"
+      - "11"
+      - "12"
+
+  - id: taxi_type
+    type: SELECT
+    defaults: "green"
+    displayName: "Taxi Type"
+    values:
+      - green
+      - yellow
+
+triggers:
+  - id: daily_schedule
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 0 * * *" # Daily at midnight UTC
+
+tasks:
+  - id: ingest_data_python
+    type: io.kestra.plugin.scripts.python.Script
+    description: Run a Python script to ingest data into PostgreSQL.
+    containerImage: ing_dependencies:latest
+
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      pullPolicy: IF_NOT_PRESENT
+      ## we needed to add this section to tell kestra which network we are using otherwise it couldnt find the right network which all images are inside
+      networkMode: nyc_taxi_local_setup_default
+      cpu:
+        cpus: 1
+      memory:
+        ##If you dedicate less memory it cannot handle the yellow taxi data
+        memory: "4Gb"
+
+    script: |
+      import pandas as pd
+      from sqlalchemy import URL, create_engine
+      from tqdm import tqdm
+
+      year = "{{ inputs.year }}"
+      month = "{{ inputs.month }}"
+      taxi_type = "{{ inputs.taxi_type }}"
+      ## key values
+      username = "{{ kv('username') }}"
+      password = "{{ kv('password') }}"
+      # Database connection setup
+      url_object = URL.create(
+          "postgresql+pg8000",
+          username=username,
+          password=password,
+          host="postgres",
+          database="NYC_Taxi",
+      )
+      engine = create_engine(url_object)
+
+      # Function to load taxi data from the specified URL
+      def load_taxi_data(year, month, taxi_type):
+          prefix = "https://d37ci6vzurychx.cloudfront.net/trip-data/"
+          month = str(month).zfill(2)
+          url = f"{prefix}{taxi_type}_tripdata_{year}-{month}.parquet"
+          df = pd.read_parquet(url, engine="pyarrow")
+          table_name = f"{taxi_type}_tripdata_{year}_{month}"
+          return df, table_name
+
+      # Function to split the DataFrame into chunks
+      def split_dataframe(df, chunk_size):
+          for i in range(0, len(df), chunk_size):
+              yield df.iloc[i:i + chunk_size]
+
+      # Main function to load the data into the database in chunks
+      def main(year, month, taxi_type):
+          df, table_name = load_taxi_data(year, month, taxi_type)
+
+          chunk_size = 10000
+          for i, chunk in enumerate(tqdm(split_dataframe(df, chunk_size), desc="Loading chunks")):
+            if i == 0:
+              mode = "delete_rows"
+            else:
+              mode = "append"
+            chunk.to_sql(
+                table_name,
+                engine,
+                if_exists=mode,
+                index=False,
+                method="multi",
+                chunksize=1000
+            )
+            print(f"chunk {i + 1} loaded | rows in chunk: {len(chunk)}")
+
+      if __name__ == "__main__":
+          main(year, month, taxi_type)
