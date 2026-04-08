@@ -1,0 +1,256 @@
+id: python-postgres-ingestion_v3
+namespace: company.team
+description: Scheduled flow to ingest data into PostgreSQL using a Python script.
+
+inputs:
+  - id: year
+    type: SELECT
+    displayName: "Year"
+    defaults: "2026"
+    values:
+      - "2020"
+      - "2021"
+      - "2022"
+      - "2023"
+      - "2024"
+      - "2025"
+      - "2026"
+
+  - id: month
+    type: SELECT
+    defaults: "01"
+    displayName: "Month"
+    values:
+      - "01"
+      - "02"
+      - "03"
+      - "04"
+      - "05"
+      - "06"
+      - "07"
+      - "08"
+      - "09"
+      - "10"
+      - "11"
+      - "12"
+
+  - id: taxi_type
+    type: SELECT
+    defaults: "green"
+    displayName: "Taxi Type"
+    values:
+      - green
+      - yellow
+
+triggers:
+  - id: daily_schedule
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 0 * * *"
+
+tasks:
+  - id: ingest_data_python
+    type: io.kestra.plugin.scripts.python.Script
+    description: Run a Python script to ingest data into PostgreSQL.
+    containerImage: ing_dependencies:latest
+
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      pullPolicy: IF_NOT_PRESENT
+      networkMode: nyc_taxi_local_setup_default
+      cpu:
+        cpus: 1
+      memory:
+        memory: "2Gb"
+
+    script: |
+      import pandas as pd
+      from sqlalchemy import URL, create_engine
+      from tqdm import tqdm
+
+      year = "{{ inputs.year }}"
+      month = "{{ inputs.month }}"
+      taxi_type = "{{ inputs.taxi_type }}"
+
+      username = "{{ kv('username') }}"
+      password = "{{ kv('password') }}"
+
+      url_object = URL.create(
+          "postgresql+pg8000",
+          username=username,
+          password=password,
+          host="postgres",
+          database="NYC_Taxi",
+      )
+      engine = create_engine(url_object)
+
+      def load_taxi_data(year, month, taxi_type):
+          prefix = "https://d37ci6vzurychx.cloudfront.net/trip-data/"
+          month = str(month).zfill(2)
+          url = f"{prefix}{taxi_type}_tripdata_{year}-{month}.parquet"
+          df = pd.read_parquet(url, engine="pyarrow")
+          table_name = f"{taxi_type}_tripdata_{year}_{month}"
+          return df, table_name
+
+      def split_dataframe(df, chunk_size):
+          for i in range(0, len(df), chunk_size):
+              yield df.iloc[i:i + chunk_size]
+
+      def main(year, month, taxi_type):
+          df, table_name = load_taxi_data(year, month, taxi_type)
+
+          chunk_size = 10000
+          for i, chunk in enumerate(
+              tqdm(split_dataframe(df, chunk_size), desc="Loading chunks")
+          ):
+              if i == 0:
+                  mode = "delete_rows"
+              else:
+                  mode = "append"
+
+              chunk.to_sql(
+                  table_name,
+                  engine,
+                  if_exists=mode,
+                  index=False,
+                  method="multi",
+                  chunksize=1000,
+              )
+
+              print(f"chunk {i + 1} loaded | rows in chunk: {len(chunk)}")
+
+      if __name__ == "__main__":
+          main(year, month, taxi_type)
+
+  - id: create_table
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://postgres:5432/NYC_Taxi
+    username: "{{ kv('username') }}"
+    password: "{{ kv('password') }}"
+    sql: |
+      CREATE TABLE IF NOT EXISTS public.raw_green_tripdata (
+          trip_id VARCHAR PRIMARY KEY,
+          "VendorID" integer,
+          lpep_pickup_datetime timestamp,
+          lpep_dropoff_datetime timestamp,
+          store_and_fwd_flag text,
+          "RatecodeID" double precision,
+          "PULocationID" integer,
+          "DOLocationID" integer,
+          passenger_count double precision,
+          trip_distance double precision,
+          fare_amount double precision,
+          extra double precision,
+          mta_tax double precision,
+          tip_amount double precision,
+          tolls_amount double precision,
+          ehail_fee double precision,
+          improvement_surcharge double precision,
+          total_amount double precision,
+          payment_type double precision,
+          trip_type double precision,
+          congestion_surcharge double precision,
+          cbd_congestion_fee double precision,
+          file_name VARCHAR,
+          ingestion_datetime timestamp,
+          updated_datetime timestamp
+      );
+
+  - id: upsert_data
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://postgres:5432/NYC_Taxi
+    username: "{{ kv('username') }}"
+    password: "{{ kv('password') }}"
+    sql: |
+      INSERT INTO public.raw_green_tripdata (
+          trip_id,
+          "VendorID",
+          lpep_pickup_datetime,
+          lpep_dropoff_datetime,
+          store_and_fwd_flag,
+          "RatecodeID",
+          "PULocationID",
+          "DOLocationID",
+          passenger_count,
+          trip_distance,
+          fare_amount,
+          extra,
+          mta_tax,
+          tip_amount,
+          tolls_amount,
+          ehail_fee,
+          improvement_surcharge,
+          total_amount,
+          payment_type,
+          trip_type,
+          congestion_surcharge,
+          cbd_congestion_fee,
+          file_name,
+          ingestion_datetime,
+          updated_datetime
+      )
+      SELECT
+          MD5(
+              concat_ws(
+                  '||',
+                  coalesce("VendorID"::text, ''),
+                  coalesce(lpep_pickup_datetime::text, ''),
+                  coalesce(lpep_dropoff_datetime::text, ''),
+                  coalesce("PULocationID"::text, ''),
+                  coalesce("DOLocationID"::text, ''),
+                  coalesce(trip_distance::text, ''),
+                  coalesce(fare_amount::text, ''),
+                  coalesce(total_amount::text, ''),
+                  coalesce(passenger_count::text, '')
+              )
+          ) AS trip_id,
+          "VendorID",
+          lpep_pickup_datetime,
+          lpep_dropoff_datetime,
+          store_and_fwd_flag,
+          "RatecodeID",
+          "PULocationID",
+          "DOLocationID",
+          passenger_count,
+          trip_distance,
+          fare_amount,
+          extra,
+          mta_tax,
+          tip_amount,
+          tolls_amount,
+          ehail_fee,
+          improvement_surcharge,
+          total_amount,
+          payment_type,
+          trip_type,
+          congestion_surcharge,
+          cbd_congestion_fee,
+          '{{ inputs.taxi_type }}_tripdata_{{ inputs.year }}_{{ inputs.month }}' AS file_name,
+          NOW(),
+          NULL
+      FROM {{ inputs.taxi_type }}_tripdata_{{ inputs.year }}_{{ inputs.month }}
+      ON CONFLICT (trip_id)
+      DO UPDATE SET
+          "VendorID" = excluded."VendorID",
+          lpep_pickup_datetime = excluded.lpep_pickup_datetime,
+          lpep_dropoff_datetime = excluded.lpep_dropoff_datetime,
+          store_and_fwd_flag = excluded.store_and_fwd_flag,
+          "RatecodeID" = excluded."RatecodeID",
+          "PULocationID" = excluded."PULocationID",
+          "DOLocationID" = excluded."DOLocationID",
+          passenger_count = excluded.passenger_count,
+          trip_distance = excluded.trip_distance,
+          fare_amount = excluded.fare_amount,
+          extra = excluded.extra,
+          mta_tax = excluded.mta_tax,
+          tip_amount = excluded.tip_amount,
+          tolls_amount = excluded.tolls_amount,
+          ehail_fee = excluded.ehail_fee,
+          improvement_surcharge = excluded.improvement_surcharge,
+          total_amount = excluded.total_amount,
+          payment_type = excluded.payment_type,
+          trip_type = excluded.trip_type,
+          congestion_surcharge = excluded.congestion_surcharge,
+          cbd_congestion_fee = excluded.cbd_congestion_fee,
+          file_name = excluded.file_name,
+          ingestion_datetime = excluded.ingestion_datetime,
+          updated_datetime = NOW();
