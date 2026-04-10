@@ -1,0 +1,7 @@
+pandas==3.0.0
+pyarrow==18.1.0
+sqlalchemy==2.0.36
+pg8000==1.31.2
+tqdm==4.67.1
+numpy==2.2.1
+psycopg2-binary==2.9.10
