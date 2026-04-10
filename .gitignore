@@ -6,3 +6,39 @@
 *\.DS_Store
 __pycache__/
 *.pyc
+# 🔹 Virtual environments
+venv/
+env/
+dbt-env/
+.venv/
+
+# 🔹 Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 🔹 Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# 🔹 Environment variables
+.env
+
+# 🔹 Logs
+*.log
+
+# 🔹 OS / system files
+.DS_Store
+Thumbs.db
+
+# 🔹 VS Code / IDE
+.vscode/
+.idea/
+
+# 🔹 dbt specific (optional but useful)
+target/
+dbt_packages/
+logs/
+
+# 🔹 Mac/Linux temp files
+*~
