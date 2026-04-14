@@ -42,3 +42,4 @@ logs/
 
 # 🔹 Mac/Linux temp files
 *~
+dbt_internal_packages/
